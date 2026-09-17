@@ -1,0 +1,22 @@
+{
+  "name": "npu-workflow-observer",
+  "displayName": "NPU Workflow Observer",
+  "version": "0.1.0",
+  "engines": {"vscode": "^1.90.0"},
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {"command": "npuObserver.recordDecision", "title": "NPU Observer: Record Decision"}
+    ],
+    "configuration": {
+      "title": "NPU Workflow Observer",
+      "properties": {
+        "npuObserver.host": {"type": "string", "default": "127.0.0.1"},
+        "npuObserver.port": {"type": "number", "default": 43189}
+      }
+    }
+  },
+  "scripts": {"compile": "tsc -p ./"},
+  "devDependencies": {"@types/node": "^22.0.0", "@types/vscode": "^1.90.0", "typescript": "^5.6.0"}
+}
