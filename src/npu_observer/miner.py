@@ -2,13 +2,31 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import json
 
-IGNORE={"shell.command.started","source.git.snapshot"}
+IGNORE={
+    "shell.command.started",
+    "source.git.snapshot",
+    "agent.session.record",
+    "agent.prompt.record",
+    "agent.response.record",
+    "agent.usage.updated",
+    "agent.item.completed",
+    "agent.thought.completed",
+    "agent.hook.observed",
+}
+
 
 def _semantic_name(e: dict) -> str:
     a=e.get("attributes",{})
     if e["name"] == "shell.command.completed":
         role=a.get("role")
         if role: return role
+    if e["name"] in {"agent.tool.started","agent.tool.completed","agent.tool.failed"}:
+        record=a.get("record") if isinstance(a.get("record"),dict) else {}
+        hook=a.get("hook_payload") if isinstance(a.get("hook_payload"),dict) else {}
+        tool=record.get("name") or hook.get("tool_name") or hook.get("name")
+        if tool:
+            suffix=e["name"].split(".")[-1]
+            return f"agent.tool.{str(tool).replace(' ','_')}.{suffix}"
     return e["name"]
 
 
