@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npu-workflow-observer"
+version = "0.1.0"
+description = "Local-first workflow observer for NPU operator development"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+npu-observer = "npu_observer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
