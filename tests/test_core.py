@@ -98,6 +98,11 @@ class CoreTests(unittest.TestCase):
         ]
         linked=link_to_agent_traces(events,window_minutes=30)
         self.assertEqual(linked,{'b':'trace-1'})
+        events[1]['trace_id']='trace-1'
+        sessions=assign_sessions(events,gap_minutes=45)
+        self.assertEqual(sessions['a'],'trace-1')
+        self.assertEqual(sessions['b'],'trace-1')
+        self.assertNotEqual(sessions['c'],'trace-1')
 
 
 if __name__=='__main__': unittest.main()
