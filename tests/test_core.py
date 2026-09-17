@@ -50,8 +50,8 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/'hooks.json'
             path.write_text(json.dumps({'version':1,'hooks':{'afterFileEdit':[{'command':'echo keep-me'}]}}))
-            _,added1=install_cursor_hooks(path)
-            _,added2=install_cursor_hooks(path)
+            _,added1=install_cursor_hooks(path, executable='npu-observer')
+            _,added2=install_cursor_hooks(path, executable='npu-observer')
             cfg=json.loads(path.read_text())
             commands=[x['command'] for x in cfg['hooks']['afterFileEdit']]
             self.assertIn('echo keep-me',commands)
