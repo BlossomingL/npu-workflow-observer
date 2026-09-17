@@ -22,8 +22,10 @@ def _repo_key(event: dict[str, Any]) -> str:
 def link_to_agent_traces(events: list[dict[str, Any]], window_minutes: int = 30) -> dict[str, str]:
     """Attach non-agent events to the closest active agent trace in the same repo.
 
-    This is deliberately conservative: only events with no trace_id are candidates, and
-    the latest agent event must be within ``window_minutes`` in the same repository/worktree.
+    Only events without an existing trace are candidates. Once a non-agent event is
+    linked, it advances the trace's last-seen timestamp, allowing a continuous build →
+    test → profile chain to remain attached without requiring a fresh Agent event between
+    every external tool invocation.
     """
     ordered = sorted(events, key=lambda x: x["timestamp"])
     active: dict[str, tuple[str, datetime]] = {}
@@ -45,7 +47,9 @@ def link_to_agent_traces(events: list[dict[str, Any]], window_minutes: int = 30)
         if not current:
             continue
         trace_id, last_seen = current
-        if abs((when - last_seen).total_seconds()) <= window_minutes * 60:
+        delta=(when-last_seen).total_seconds()
+        if 0 <= delta <= window_minutes * 60:
             updates[event["event_id"]] = trace_id
+            active[repo] = (trace_id, when)
 
     return updates
