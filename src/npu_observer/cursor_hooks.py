@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +22,23 @@ CURSOR_OBSERVER_HOOKS = (
 )
 
 
-def hook_command(hook: str) -> str:
-    return f"npu-observer agent-hook --provider cursor --hook {hook}"
+def _quote_command_path(path: str) -> str:
+    if any(ch.isspace() for ch in path):
+        return '"' + path.replace('"', '\\"') + '"'
+    return path
+
+
+def observer_executable() -> str:
+    """Resolve an executable that Cursor can invoke even outside the current venv PATH."""
+    found = shutil.which("npu-observer")
+    if found:
+        return _quote_command_path(str(Path(found).resolve()))
+    return f'{_quote_command_path(sys.executable)} -m npu_observer.cli'
+
+
+def hook_command(hook: str, executable: str | None = None) -> str:
+    exe = executable or observer_executable()
+    return f"{exe} agent-hook --provider cursor --hook {hook}"
 
 
 def expected_hook_response(hook: str) -> dict[str, Any]:
@@ -44,7 +61,7 @@ def _load(path: Path) -> dict[str, Any]:
     return data
 
 
-def install_cursor_hooks(path: str | Path) -> tuple[Path, int]:
+def install_cursor_hooks(path: str | Path, executable: str | None = None) -> tuple[Path, int]:
     """Merge observer commands into an existing Cursor hooks.json idempotently."""
     path = Path(path).expanduser()
     cfg = _load(path)
@@ -53,7 +70,7 @@ def install_cursor_hooks(path: str | Path) -> tuple[Path, int]:
         entries = cfg["hooks"].setdefault(hook, [])
         if not isinstance(entries, list):
             raise ValueError(f"Cursor hook {hook} must be a list")
-        command = hook_command(hook)
+        command = hook_command(hook, executable=executable)
         if not any(isinstance(x, dict) and x.get("command") == command for x in entries):
             entries.append({"command": command, "timeout": 10})
             added += 1
