@@ -14,7 +14,7 @@ from .schema import Event, now_iso
 
 _SESSION_KEYS = (
     "conversation_id", "conversationId", "session_id", "sessionId",
-    "thread_id", "threadId", "run_id", "runId", "task_id", "taskId", "id",
+    "thread_id", "threadId", "run_id", "runId", "task_id", "taskId",
 )
 _SECRET_KEY = re.compile(r"(token|secret|password|passwd|api[_-]?key|authorization)", re.I)
 _UUID_AT_END = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$")
@@ -60,7 +60,7 @@ def _nested_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def agent_session_id(payload: dict[str, Any], fallback: str | None = None) -> str | None:
-    """Find a native conversation/session id without recursively scanning arbitrary content."""
+    """Find native conversation/session ids, deliberately excluding generic record ids."""
     for candidate in (
         payload,
         _nested_dict(payload, "payload"),
@@ -78,8 +78,6 @@ def _cursor_fallback_session(cwd: str | None = None) -> tuple[str | None, str | 
     if transcript:
         digest = hashlib.sha256(str(Path(transcript).expanduser()).encode()).hexdigest()[:24]
         return f"cursor-{digest}", transcript
-    # Without a transcript or native session id, leave session_id unset. The generic
-    # repo/branch + time-gap sessionizer is safer than incorrectly merging all chats.
     return None, None
 
 
@@ -132,9 +130,6 @@ def event_from_hook(provider: str, hook: str, payload: dict[str, Any], cwd: str 
         transcript = os.environ.get("CURSOR_TRANSCRIPT_PATH")
 
     event_name = semantic_hook_name(provider, hook, clean)
-
-    # Do not persist model hidden reasoning/thought text. Cursor exposes an
-    # afterAgentThought hook, but the observer stores only timing/metadata.
     if event_name == "agent.thought.completed":
         hook_payload: dict[str, Any] = {
             "duration_ms": clean.get("duration_ms"),
@@ -177,9 +172,15 @@ def _codex_meta(row: dict[str, Any]) -> dict[str, Any]:
 
 def codex_session_id(path: str | Path, row: dict[str, Any] | None = None) -> str:
     if row:
-        found = agent_session_id(row)
-        if found:
-            return found
+        if row.get("type") == "session_meta":
+            meta = _codex_meta(row)
+            value = _first(meta, (*_SESSION_KEYS, "id"))
+            if value is not None:
+                return str(value)
+        else:
+            found = agent_session_id(row)
+            if found:
+                return found
     match = _UUID_AT_END.search(Path(path).stem)
     if match:
         return match.group(1)
@@ -212,7 +213,6 @@ def _codex_semantic(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
     if outer == "session_meta":
         meta = _codex_meta(row)
-        # Keep metadata only: base/system/developer instructions are not useful workflow evidence.
         detail = {k: meta.get(k) for k in (
             "id", "session_id", "cwd", "originator", "cli_version", "source",
             "thread_source", "model_provider", "model", "agent_nickname", "agent_role",
@@ -347,7 +347,7 @@ def follow_codex(path: str | Path, poll_seconds: float = 1.0) -> Iterator[Event]
 
 
 def follow_codex_root(root: str | Path, poll_seconds: float = 1.0) -> Iterator[Event]:
-    """Follow all active/new Codex rollout files and discover new sessions automatically."""
+    """Follow active/new Codex rollout files and discover new sessions automatically."""
     root = Path(root).expanduser()
     offsets: dict[str, int] = {}
     while True:
