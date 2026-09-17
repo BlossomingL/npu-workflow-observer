@@ -17,19 +17,33 @@ def _fingerprint(e: dict) -> str:
 
 
 def assign_sessions(events: list[dict], gap_minutes: int=45) -> dict[str,str]:
-    """Assign human/shell events to sessions while preserving agent-native sessions.
+    """Assign events to sessions while preserving coding-agent trace correlation.
 
-    Coding-agent adapters already provide stable conversation/session IDs. Those IDs are
-    kept intact so Cursor/Codex prompts, patches and tool calls stay in the same trace.
-    Other events continue to use repo/branch + inactivity-gap sessionization.
+    Native Cursor/Codex events carry their own conversation/session trace. ``link-agent``
+    can attach shell/test/profile events to those traces. Once a trace is known to belong
+    to a coding agent, every event carrying that trace is assigned to the same session.
+    Remaining events use repo/branch + inactivity-gap sessionization.
     """
     groups=defaultdict(list)
     assigned: dict[str, str] = {}
+    agent_traces: set[str] = set()
+
     for e in events:
         source=str(e.get("source") or "")
+        if source.startswith("agent:"):
+            trace=e.get("trace_id") or e.get("session_id")
+            if trace:
+                agent_traces.add(str(trace))
+
+    for e in events:
+        source=str(e.get("source") or "")
+        trace=e.get("trace_id")
         native=e.get("session_id")
+        if trace and str(trace) in agent_traces:
+            assigned[e["event_id"]]=str(trace)
+            continue
         if native and source.startswith("agent:"):
-            assigned[e["event_id"]]=native
+            assigned[e["event_id"]]=str(native)
             continue
         groups[_fingerprint(e)].append(e)
 

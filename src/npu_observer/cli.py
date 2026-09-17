@@ -10,7 +10,9 @@ from .store import EventStore
 from .sessionizer import assign_sessions
 from .miner import mine, workflow_yaml
 from .daemon import run as run_daemon
-from .agent import event_from_hook, codex_events, latest_codex_sessions, follow_codex
+from .agent import event_from_hook, codex_events, latest_codex_sessions, follow_codex, follow_codex_root
+from .cursor_hooks import default_cursor_hooks_path, expected_hook_response, install_cursor_hooks
+from .linker import link_to_agent_traces
 
 DEFAULT_HOME=Path(os.environ.get("NPU_OBSERVER_HOME","~/.npu-observer")).expanduser()
 DEFAULT_DB=str(DEFAULT_HOME/"observer.db")
@@ -63,15 +65,24 @@ def cmd_event(args):
 
 
 def cmd_agent_hook(args):
+    raw=sys.stdin.read()
     try:
-        payload=json.load(sys.stdin)
+        payload=json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
-        payload={"raw":sys.stdin.read()}
+        payload={"raw":redact_text(raw)}
     if not isinstance(payload,dict): payload={"value":payload}
     event=event_from_hook(args.provider,args.hook,payload,args.cwd)
     emit(event,args.db)
-    # Cursor command hooks communicate over stdio. Empty JSON means "observe only".
-    print("{}")
+    # Cursor hooks communicate over stdio. For hooks with a response schema we
+    # explicitly return the non-blocking value instead of relying on `{}`.
+    response=expected_hook_response(args.hook) if args.provider == "cursor" else {}
+    print(json.dumps(response,ensure_ascii=False))
+
+
+def cmd_cursor_install(args):
+    path=Path(args.path).expanduser() if args.path else default_cursor_hooks_path(args.scope,args.project_dir)
+    installed,added=install_cursor_hooks(path)
+    print(f"Cursor observer hooks: {installed} (added {added})")
 
 
 def _resolve_codex_paths(args) -> list[Path]:
@@ -85,20 +96,34 @@ def cmd_import_codex(args):
     for path in paths:
         for event in codex_events(path):
             st.insert(event.to_dict()); count += 1
-    print(f"imported {count} records from {len(paths)} Codex session file(s)")
+    print(f"imported/scanned {count} records from {len(paths)} Codex session file(s)")
 
 
 def cmd_watch_codex(args):
-    paths=_resolve_codex_paths(args)
-    if not paths:
-        raise SystemExit(f"no Codex rollout JSONL found under {args.root}")
-    path=paths[0]
-    print(f"watching Codex session: {path}", file=sys.stderr)
+    if args.path:
+        path=Path(args.path).expanduser()
+        if not path.exists():
+            raise SystemExit(f"Codex rollout not found: {path}")
+        iterator=follow_codex(path,args.poll)
+        print(f"watching Codex session: {path}", file=sys.stderr)
+    else:
+        root=Path(args.root).expanduser()
+        print(f"watching Codex sessions under: {root}", file=sys.stderr)
+        iterator=follow_codex_root(root,args.poll)
     try:
-        for event in follow_codex(path,args.poll):
+        for event in iterator:
             emit(event,args.db)
     except KeyboardInterrupt:
         pass
+
+
+def cmd_link_agent(args):
+    st=EventStore(args.db)
+    events=st.rows(args.limit)
+    updates=link_to_agent_traces(events,args.window)
+    for event_id,trace_id in updates.items():
+        st.update_trace(event_id,trace_id)
+    print(f"linked {len(updates)} non-agent event(s) to coding-agent traces")
 
 
 def cmd_sessionize(args):
@@ -130,18 +155,28 @@ def main():
     ah.add_argument("--cwd")
     ah.set_defaults(func=cmd_agent_hook)
 
+    cur=sp.add_parser("cursor-install",help="merge NPU Observer commands into Cursor hooks.json")
+    cur.add_argument("--scope",choices=["user","project"],default="user")
+    cur.add_argument("--project-dir")
+    cur.add_argument("--path",help="explicit hooks.json path; overrides --scope")
+    cur.set_defaults(func=cmd_cursor_install)
+
     ci=sp.add_parser("import-codex",help="import Codex rollout JSONL sessions")
     ci.add_argument("--path",help="one rollout-*.jsonl; otherwise scan --root")
     ci.add_argument("--root",default=str(DEFAULT_CODEX_SESSIONS))
     ci.add_argument("--latest",type=int,default=20)
     ci.set_defaults(func=cmd_import_codex)
 
-    cw=sp.add_parser("watch-codex",help="follow the latest Codex rollout JSONL")
-    cw.add_argument("--path")
+    cw=sp.add_parser("watch-codex",help="follow Codex rollout JSONL and auto-discover new sessions")
+    cw.add_argument("--path",help="watch one rollout file instead of the whole sessions root")
     cw.add_argument("--root",default=str(DEFAULT_CODEX_SESSIONS))
-    cw.add_argument("--latest",type=int,default=1)
     cw.add_argument("--poll",type=float,default=1.0)
     cw.set_defaults(func=cmd_watch_codex)
+
+    la=sp.add_parser("link-agent",help="link shell/test/profile events to nearby coding-agent traces")
+    la.add_argument("--window",type=int,default=30,help="maximum time distance in minutes")
+    la.add_argument("--limit",type=int,default=100000)
+    la.set_defaults(func=cmd_link_agent)
 
     s=sp.add_parser("sessionize"); s.add_argument("--gap",type=int,default=45); s.add_argument("--limit",type=int,default=100000); s.set_defaults(func=cmd_sessionize)
     m=sp.add_parser("mine"); m.add_argument("--limit",type=int,default=100000); m.add_argument("--min-support",type=float,default=.5); m.add_argument("--name",default="npu_observed_workflow"); m.add_argument("-o","--output",default="workflow.generated.yaml"); m.set_defaults(func=cmd_mine)
