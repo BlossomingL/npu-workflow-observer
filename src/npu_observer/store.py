@@ -1,7 +1,6 @@
 from __future__ import annotations
 import json, sqlite3, threading
 from pathlib import Path
-from typing import Iterable
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -38,15 +37,15 @@ class EventStore:
         attrs = event.get("attributes", {})
         with self._lock:
             self.conn.execute(
-            """INSERT OR IGNORE INTO events
-            (event_id,timestamp,name,kind,source,trace_id,session_id,parent_id,cwd,host,pid,attributes_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                event.get("event_id"), event.get("timestamp"), event.get("name"), event.get("kind","event"),
-                event.get("source"), event.get("trace_id"), event.get("session_id"), event.get("parent_id"),
-                event.get("cwd"), event.get("host"), event.get("pid"), json.dumps(attrs, ensure_ascii=False),
-            ),
-        )
+                """INSERT OR IGNORE INTO events
+                (event_id,timestamp,name,kind,source,trace_id,session_id,parent_id,cwd,host,pid,attributes_json)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event.get("event_id"), event.get("timestamp"), event.get("name"), event.get("kind","event"),
+                    event.get("source"), event.get("trace_id"), event.get("session_id"), event.get("parent_id"),
+                    event.get("cwd"), event.get("host"), event.get("pid"), json.dumps(attrs, ensure_ascii=False),
+                ),
+            )
             self.conn.commit()
 
     def rows(self, limit: int = 5000) -> list[dict]:
@@ -59,5 +58,16 @@ class EventStore:
 
     def update_session(self, event_id: str, session_id: str, trace_id: str | None = None) -> None:
         with self._lock:
-            self.conn.execute("UPDATE events SET session_id=?, trace_id=COALESCE(trace_id, ?) WHERE event_id=?", (session_id, trace_id, event_id))
+            self.conn.execute(
+                "UPDATE events SET session_id=?, trace_id=COALESCE(trace_id, ?) WHERE event_id=?",
+                (session_id, trace_id, event_id),
+            )
+            self.conn.commit()
+
+    def update_trace(self, event_id: str, trace_id: str, overwrite: bool = False) -> None:
+        with self._lock:
+            if overwrite:
+                self.conn.execute("UPDATE events SET trace_id=? WHERE event_id=?", (trace_id, event_id))
+            else:
+                self.conn.execute("UPDATE events SET trace_id=COALESCE(trace_id, ?) WHERE event_id=?", (trace_id, event_id))
             self.conn.commit()
