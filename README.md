@@ -1,54 +1,276 @@
-# NPU Workflow Observer MVP
+# NPU Workflow Observer v0.2
 
-一个**本地优先（Local-first）**的 NPU 研发工作流观察器，用于把日常 NPU 算子开发过程转成结构化 Trace，后续可进一步编译成可复用的 Workflow / Agent。
+一个**本地优先（Local-first）**的 NPU 研发工作流观察器。
 
-这个项目的目标不是录屏，而是把“改代码 → 编译 → 上板 → 测试 → 精度分析 → 性能分析 → 决策 → 再优化”这类研发过程记录成可分析、可归纳、可复用的数据。
+它的目标不是录屏，而是把你真实的研发过程：
 
-## 当前 MVP 能记录什么
+```text
+你给 Cursor / Codex 下任务
+        ↓
+Coding Agent 阅读 / 修改代码
+        ↓
+执行 Shell / Build / Test
+        ↓
+上板 / 精度 / Benchmark / Profile
+        ↓
+得到结果
+        ↓
+继续修改 / 形成结论
+```
 
-- Shell 命令、退出码、执行耗时、工作目录，以及命令角色（`build/test/benchmark/profile/remote`）。
-- Git 仓库、分支、commit、dirty 状态，以及可选的 diff。
-- VSCode 文件保存事件 + Git diff。
-- 显式的 `decision.created` 专家决策事件，用来记录“为什么要这样改”。
-- NPU 领域事件，例如 `npu.test.*`、`npu.accuracy.*`、`npu.benchmark.*`。
-- 自动把零散事件聚合成一次研发 Session。
-- 从多个 Session 中归纳 Workflow，并生成 `workflow.generated.yaml`。
+转换成结构化 Trace，后续用于：
 
-Observer daemon 默认只监听 `127.0.0.1`，当前没有任何云端上传逻辑。
+```text
+Workflow Mining
+    ↓
+Shadow Agent
+    ↓
+Workflow → Agent Compiler
+    ↓
+Test / Debug / Precision / Performance Agent
+```
 
-## 安装
+---
+
+## v0.2 的重点：观察 Cursor / Codex
+
+如果你的大部分研发工作已经通过 Cursor 或 Codex 完成，那么 Observer 的核心数据源就不应该只是键盘、终端和 VSCode 文件保存，而应该包括 **Coding Agent 自己的工作轨迹**。
+
+v0.2 新增：
+
+- Cursor Agent Hooks 观察；
+- 一条命令安装 Cursor hooks；
+- 记录用户 Prompt；
+- 记录 Agent 最终回复；
+- 记录 Agent 文件修改；
+- 记录 Agent Shell / Tool 调用结果；
+- 记录 Agent Task / Session 生命周期；
+- Codex rollout JSONL 导入；
+- Codex session 实时 watch；
+- 自动发现新 Codex session，不需要每次重启 watcher；
+- 自动把 Shell / Test / Profile 事件关联到最近的 Coding Agent trace；
+- Workflow Miner 自动过滤 token usage、重复 transcript record 等低价值噪声；
+- Python 3.10 / 3.12 GitHub Actions 单元测试。
+
+### 一个重要的隐私设计
+
+Observer **不会保存模型隐藏 reasoning / chain-of-thought 内容**。
+
+对于 Cursor `afterAgentThought` 和 Codex reasoning record，只记录：
+
+```text
+agent.thought.completed
+content_recorded = false
+duration_ms = ...   # 如果数据源提供
+```
+
+我们真正需要学习的是可审计信息：
+
+```text
+Prompt
+Tool Call
+Patch
+Build/Test/Profile
+Result
+Decision
+Final Response
+```
+
+而不是模型内部思维链。
+
+---
+
+# 1. 安装
 
 ```bash
+git clone https://github.com/BlossomingL/npu-workflow-observer.git
 cd npu-workflow-observer
-python -m venv .venv
+
+python3 -m venv .venv
 source .venv/bin/activate
-pip install -e . --no-build-isolation
+pip install -e .
 ```
 
-## 1. 启动 Observer
+确认：
 
 ```bash
-npu-observer daemon
+npu-observer --help
 ```
 
-默认数据库路径：
+主要命令：
+
+```text
+daemon
+exec
+git-snapshot
+decision
+event
+agent-hook
+cursor-install
+import-codex
+watch-codex
+link-agent
+sessionize
+mine
+```
+
+默认数据库：
 
 ```text
 ~/.npu-observer/observer.db
 ```
 
-也可以自定义存储目录：
+可以修改：
 
 ```bash
 export NPU_OBSERVER_HOME=/path/to/private/storage
-npu-observer daemon
 ```
 
-## 2. 记录命令
+---
 
-### 推荐第一步：显式 wrapper
+# 2. Cursor：推荐使用官方 Hooks 接入
 
-先不要一上来全自动 Hook Shell，建议先通过 wrapper 验证行为是否符合预期：
+Cursor 当前支持 Agent Hooks，例如：
+
+```text
+sessionStart
+sessionEnd
+beforeSubmitPrompt
+afterShellExecution
+afterFileEdit
+postToolUseFailure
+afterAgentResponse
+afterAgentThought
+stop
+```
+
+Observer 使用这些 Hook 获取 Agent 的结构化行为，不需要录屏。
+
+## 用户级安装
+
+```bash
+npu-observer cursor-install --scope user
+```
+
+会安全地合并到：
+
+```text
+~/.cursor/hooks.json
+```
+
+不会覆盖已有 hooks，并且重复执行是幂等的。
+
+## 仅当前项目安装
+
+在目标代码仓中执行：
+
+```bash
+npu-observer cursor-install --scope project
+```
+
+生成 / 合并：
+
+```text
+<project>/.cursor/hooks.json
+```
+
+也可以指定路径：
+
+```bash
+npu-observer cursor-install --path /custom/path/hooks.json
+```
+
+### Cursor 会记录什么
+
+典型事件：
+
+```text
+agent.task.started
+agent.prompt.submitted
+agent.tool.completed
+agent.patch.applied
+agent.tool.failed
+agent.response.completed
+agent.thought.completed   # 不保存 thought 文本
+agent.task.completed
+agent.session.completed
+```
+
+Cursor 如果提供 `CURSOR_TRANSCRIPT_PATH`，Observer 会基于该路径生成稳定 session id，将同一次对话里的事件关联起来。
+
+---
+
+# 3. Codex：直接观察本地 rollout JSONL
+
+Codex CLI / App 会把会话记录保存在类似：
+
+```text
+$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl
+```
+
+默认 `CODEX_HOME` 通常是：
+
+```text
+~/.codex
+```
+
+## 导入最近的 Codex 会话
+
+```bash
+npu-observer import-codex --latest 20
+```
+
+或者指定某个 rollout：
+
+```bash
+npu-observer import-codex \
+  --path ~/.codex/sessions/2026/09/17/rollout-xxx.jsonl
+```
+
+重复导入不会重复写入相同 record，因为 Codex event id 是确定性生成的，SQLite 使用唯一 `event_id` 去重。
+
+## 实时观察 Codex
+
+```bash
+npu-observer watch-codex
+```
+
+它会持续扫描：
+
+```text
+~/.codex/sessions
+```
+
+并自动发现新创建的 rollout session。
+
+如果只想观察一个 session：
+
+```bash
+npu-observer watch-codex --path /path/to/rollout.jsonl
+```
+
+解析的核心语义包括：
+
+```text
+session_meta        → agent.session.started
+user_message        → agent.prompt.submitted
+task_started        → agent.task.started
+function_call       → agent.tool.started
+function_call_output→ agent.tool.completed
+assistant message   → agent.response.record
+task_complete       → agent.task.completed
+reasoning           → metadata only，不保存正文
+```
+
+解析器支持当前 Codex `session_meta.payload.meta` 嵌套结构，并会从 session metadata 中继承 cwd，使后续 tool / message record 能正确归属到代码仓。
+
+---
+
+# 4. Shell / NPU Test 事件
+
+原有能力仍然保留。
+
+## 显式观察 Shell 命令
 
 ```bash
 npu-observer exec -- cmake --build build -j32
@@ -56,242 +278,247 @@ npu-observer exec -- ./run_test.sh --shape 2,32,4096,128
 npu-observer exec -- nsys profile ./benchmark
 ```
 
-Wrapper 会记录：
+记录：
 
-- 命令开始/结束时间
-- return code
-- 执行耗时
-- cwd
-- Git 上下文
-- 命令类型
-
-### 可选：自动 Bash Hook
-
-```bash
-source /path/to/npu-workflow-observer/scripts/bash_hook.sh
+```text
+command
+cwd
+exit_code
+duration
+git branch / commit
+command role
 ```
 
-本地验证稳定后，可以把这一行加入：
-
-```bash
-~/.bashrc
-```
-
-这个 Hook 只记录命令级元数据，**不会记录原始键盘输入、剪贴板或屏幕截图**。
-
-## 3. 记录 Git 状态
-
-```bash
-npu-observer git-snapshot
-```
-
-默认会保存当前 working tree diff。
-
-如果只想记录 Git 元信息，不记录源码 diff：
-
-```bash
-npu-observer git-snapshot --no-diff
-```
-
-## 4. 记录专家决策
-
-这一类信息非常重要，因为仅仅记录“用户做了什么”，并不能让 Agent 学会“为什么这么做”。
+## NPU 领域事件
 
 例如：
 
 ```bash
-npu-observer decision \
-  -m "tile_n 从 128 调整到 256" \
-  --reason "MTE bound，Cube 利用率偏低" \
-  --evidence "profile=run_20260917_01"
+npu-observer event npu.test.completed --source adapter \
+  --attributes '{
+    "operator":"flash_attention_score_grad",
+    "shape":{"B":2,"N":32,"S":4096,"D":128},
+    "dtype":"bf16",
+    "layout":"TND",
+    "pass":true
+  }'
 ```
 
-理想情况下，未来 Observer 可以把下面这些信息关联起来：
-
-```text
-Profile 结果
-    ↓
-识别瓶颈
-    ↓
-专家决策
-    ↓
-代码修改
-    ↓
-重新测试
-    ↓
-性能变化
-```
-
-这部分数据以后会成为 Performance Agent 最重要的经验来源之一。
-
-## 5. 发送 NPU 领域事件
-
-建议在已有测试、精度、benchmark、profiler 工具外面增加 Adapter，把原始执行结果转换成统一事件。
-
-例如测试开始：
-
-```bash
-npu-observer event npu.test.started --source adapter \
-  --attributes '{"operator":"flash_attention_score_grad","shape":{"B":2,"N":32,"S":4096,"D":128},"dtype":"bf16","layout":"TND"}'
-```
-
-精度测试完成：
+精度：
 
 ```bash
 npu-observer event npu.accuracy.completed --source adapter \
-  --attributes '{"operator":"flash_attention_score_grad","cosine":0.99998,"max_abs":0.0021,"pass":true}'
+  --attributes '{
+    "cosine":0.99998,
+    "max_abs":0.0021,
+    "pass":true
+  }'
 ```
 
-性能测试完成：
+性能：
 
 ```bash
 npu-observer event npu.benchmark.completed --source adapter \
-  --attributes '{"operator":"flash_attention_score_grad","latency_us":182.4,"mfu":0.831}'
+  --attributes '{
+    "latency_us":182.4,
+    "mfu":0.831
+  }'
 ```
 
-可以参考：
+---
+
+# 5. 把 Agent 和真实测试结果串到一起
+
+这是 v0.2 很关键的一步。
+
+假设 Codex 做了：
 
 ```text
-examples/test_flow.sh
+Prompt
+ → 修改 tiling
+ → build
+ → run test
+ → profile
+ → 再改代码
 ```
 
-## 6. 自动生成 Session
+Coding Agent 的事件天然带 `trace_id`，但是你的外部测试脚本可能没有。
+
+执行：
 
 ```bash
-npu-observer sessionize --gap 45
+npu-observer link-agent --window 30
 ```
 
-当前 MVP 会优先按照：
+Observer 会保守地按照：
 
 ```text
-repository
+same repository
 +
-branch
+最近 Coding Agent trace
 +
-时间间隔
+30 分钟时间窗口
 ```
 
-对事件做聚合。
+将没有 trace 的 Shell / NPU Test / Profile 事件关联到 Coding Agent trace。
 
-当连续两个事件间隔超过 45 分钟时，会切分成新的 Session。
+然后：
 
-后续计划继续加入：
+```bash
+npu-observer sessionize
+```
+
+如果某个 trace 已确认属于 Cursor / Codex，那么同 trace 的：
 
 ```text
-operator
-shape
-task id
-git diff
-device
-remote target
+Prompt
+Patch
+Shell
+Accuracy
+Benchmark
+Profile
 ```
 
-等信息，提高 Session 聚合准确度。
+会被放进同一个 Session，而不是再次被拆开。
 
-## 7. 从 Session 中归纳 Workflow
+---
+
+# 6. 从真实 Agent Session 归纳 Workflow
 
 ```bash
 npu-observer mine \
   --min-support 0.5 \
-  --name fa_grad_test \
+  --name fa_grad_agent_workflow \
   -o workflow.generated.yaml
 ```
 
-示例输出：
+Workflow Miner 默认忽略：
+
+```text
+agent.thought.completed
+agent.usage.updated
+agent.session.record
+重复 transcript message record
+```
+
+重点保留：
+
+```text
+agent.prompt.submitted
+agent.patch.applied
+agent.tool.*
+build
+test
+npu.accuracy.*
+npu.benchmark.*
+profile
+decision.created
+agent.task.completed
+```
+
+例如未来可能得到：
 
 ```yaml
-name: fa_grad_test
+name: "fa_grad_agent_workflow"
 version: 1
-generated_from_sessions: 8
 steps:
-  - source_file_saved:
-      tool: TODO
+  - agent_prompt_submitted:
+      observed: true
+  - agent_patch_applied:
       observed: true
   - build:
-      tool: TODO
       observed: true
-  - npu_test_completed:
-      tool: TODO
+  - npu_accuracy_completed:
       observed: true
   - npu_benchmark_completed:
-      tool: TODO
       observed: true
 ```
 
-第一版会故意保留：
+当前仍然故意保留：
 
 ```yaml
 tool: TODO
 ```
 
-原因是：
-
-> Workflow 发现和 Agent 自动执行应该分阶段进行。
-
-推荐演进路径：
+因为：
 
 ```text
-Observer Mode
-    ↓
 Workflow Discovery
-    ↓
-人工 Review
-    ↓
-Shadow Mode
-    ↓
-Approval Mode
-    ↓
-Autonomous Mode
+        ≠
+立即允许 Agent 自动执行
 ```
 
-在 Workflow 没有经过验证前，不应该直接允许 Agent 自动改代码、部署或上板执行。
+推荐过程：
 
-## VSCode 扩展
+```text
+Observe
+  ↓
+Mine
+  ↓
+人工 Review
+  ↓
+Shadow Agent
+  ↓
+Approval Mode
+  ↓
+Autonomous Agent
+```
 
-当前 VSCode Extension 支持：
+---
 
-- 文件保存时记录 `source.file.saved`
-- 自动附带 Git diff
-- 在 Command Palette 中执行 `NPU Observer: Record Decision`
+# 7. 专家决策仍然非常重要
 
-编译扩展：
+Agent 操作轨迹能告诉我们：
+
+```text
+发生了什么
+```
+
+但并不总能可靠告诉我们：
+
+```text
+为什么保留这个优化方案
+```
+
+因此仍然支持：
 
 ```bash
-cd vscode-extension
-npm install
-npm run compile
+npu-observer decision \
+  -m "tile_n 128 -> 256" \
+  --reason "MTE bound，Cube 利用率低" \
+  --evidence "profile=run_001"
 ```
 
-之后可以使用 VSCode Extension Development Host 调试。
-
-如果需要打包为 VSIX，可以使用：
-
-```text
-@vscode/vsce
-```
-
-## Event 数据模型
-
-每条事件大致长这样：
+未来也可以由上层 Agent 自动输出结构化：
 
 ```json
 {
-  "event_id": "uuid",
-  "timestamp": "2026-09-17T16:00:00+08:00",
-  "name": "npu.benchmark.completed",
-  "kind": "event",
-  "source": "adapter",
+  "hypothesis": "MTE bound",
+  "evidence": ["Cube util 57%", "MTE util 92%"],
+  "action": "increase tile_n",
+  "result": "latency -8.2%"
+}
+```
+
+---
+
+# 8. 数据模型
+
+所有数据最后统一成 Event：
+
+```json
+{
+  "event_id": "...",
+  "timestamp": "...",
+  "name": "agent.patch.applied",
+  "source": "agent:cursor",
+  "trace_id": "...",
+  "session_id": "...",
   "cwd": "/repo/ops-transformer",
   "attributes": {
-    "operator": "flash_attention_score_grad",
-    "shape": {
-      "B": 2,
-      "N": 32,
-      "S": 4096,
-      "D": 128
+    "agent": {
+      "provider": "cursor"
     },
-    "latency_us": 182.4,
-    "mfu": 0.831,
     "git": {
       "branch": "perf_d128",
       "commit": "..."
@@ -300,243 +527,167 @@ npm run compile
 }
 ```
 
-推荐把它理解成一套面向 NPU 研发场景的轻量级 Trace/Event 数据模型。
+有持续时间的操作未来会逐步向 OpenTelemetry Span 靠拢；瞬时状态变化保持 Event。
 
-后续可以逐步向 OpenTelemetry 风格演进：
+---
+
+# 9. 安全与隐私
+
+默认原则：
+
+- 本地 SQLite 存储；
+- daemon 只监听 `127.0.0.1`；
+- token / password / API key 做基础脱敏；
+- 不记录原始键盘输入；
+- 不记录剪贴板；
+- 不默认截图；
+- 不保存模型隐藏 reasoning / thought 正文；
+- Git diff 有长度上限；
+- Agent / Tool 文本有长度上限；
+- Workflow 在 Review 前不自动执行源码修改、部署或上板操作。
+
+公司环境建议继续加入：
 
 ```text
-Build / Test / Profile
-    → Span
-
-Error / Decision / Commit
-    → Event
+repo/path allowlist
+source_capture = none | metadata | git_diff
+Artifact Store
+加密磁盘
+日志保留周期
+敏感路径 denylist
 ```
 
-## 隐私与安全默认策略
+---
 
-CLI 当前会对常见的 token、password、API key 等内容做基础脱敏。
+# 10. 推荐日常使用方式
 
-实际在公司研发环境使用时，建议进一步加固：
+## Cursor 用户
 
-- 数据库只存放在加密本地磁盘。
-- 增加 repository / path allowlist。
-- 大型日志、Profiler 数据不要直接塞进数据库，而是放入内容寻址 Artifact Store。
-- 永远不要采集 `~/.ssh`、凭据文件、剪贴板或原始键盘输入。
-- Source Capture 支持模式配置，例如 `metadata`、`git_diff`、`none`。
-- Agent 在修改源码、部署和上板前必须经过权限审批。
-- Shell 环境变量默认只允许白名单字段进入 Observer。
+安装一次：
 
-## 当前架构
-
-```text
-Shell / Git / VSCode / Test Adapter
-              |
-              v
-       localhost JSONL
-              |
-              v
-        observer daemon
-              |
-              v
-           SQLite
-              |
-       +------+-------+
-       |              |
-  sessionizer    workflow miner
-       |              |
-       +-------> workflow.yaml
+```bash
+npu-observer cursor-install --scope user
 ```
 
-当前 MVP 使用 SQLite，主要原因是：
+之后正常用 Cursor 工作即可。
 
-- Python 标准库自带
-- 安装零依赖
-- 方便快速落地
-- 足够支撑早期 Trace 数据量
+## Codex 用户
 
-Storage 接口保持得比较小，后续数据量增大后可以切换到 DuckDB，用于更复杂的分析和 Workflow Mining。
+开一个终端：
 
-## 推荐的使用方式
-
-第一阶段不要追求“全自动 Agent”。
-
-建议先让 Observer 安静记录真实研发流程：
-
-```text
-改代码
-  ↓
-编译
-  ↓
-部署
-  ↓
-测试
-  ↓
-精度分析
-  ↓
-性能分析
-  ↓
-Profiler
-  ↓
-专家决策
-  ↓
-再次修改
+```bash
+npu-observer watch-codex
 ```
 
-积累一定数量的 Session 后，再开始做 Workflow Mining。
+然后正常用 Codex。
 
-目标不是机械复现用户点击了什么，而是最终学习：
+## 一段时间后归纳
 
-```text
-什么情况下
-    ↓
-应该执行什么步骤
-    ↓
-依据是什么
-    ↓
-如何判断成功/失败
-    ↓
-下一步应该做什么
+```bash
+npu-observer link-agent --window 30
+npu-observer sessionize --gap 45
+npu-observer mine --name fa_grad_workflow
 ```
 
-## 下一阶段开发计划
+---
 
-### v0.2：Artifact Store
-
-支持 stdout / stderr / profile / report 等大文件使用 SHA-256 URI 管理，例如：
+# 11. 当前架构
 
 ```text
-artifact://sha256/xxxxx
+              Human
+                │
+        ┌───────┴────────┐
+        ▼                ▼
+     Cursor             Codex
+   Official Hooks    rollout JSONL
+        │                │
+        └───────┬────────┘
+                ▼
+        Coding Agent Adapter
+                │
+      ┌─────────┼──────────┐
+      ▼         ▼          ▼
+    Git       Shell      NPU Adapter
+      │         │          │
+      └─────────┼──────────┘
+                ▼
+          Unified Event DB
+                │
+          Trace Linker
+                │
+          Sessionizer
+                │
+          Workflow Miner
+                │
+                ▼
+        workflow.generated.yaml
 ```
 
-### v0.3：NPU 原生 Adapter
+---
 
-直接对接：
+# 12. 测试
 
-- Build
-- Device / Board Runner
-- Accuracy
-- Benchmark
-- Profiler
+本地：
 
-尽量减少手工执行 `npu-observer event ...`。
-
-### v0.4：Shape 识别与上下文关联
-
-自动识别：
-
-```text
-B / N / S / D
-TND / BSH / SBH
-causal
-sparse
-FP16 / BF16 / FP8
+```bash
+python -m unittest discover -s tests -v
 ```
 
-并关联后续 build / test / benchmark / profile。
-
-### v0.5：Workflow Branch
-
-支持自动归纳分支，例如：
+GitHub Actions 当前覆盖：
 
 ```text
-accuracy pass
-    ↓
-benchmark
-
-accuracy fail
-    ↓
-precision debug
+Python 3.10
+Python 3.12
 ```
 
-以及：
+核心测试包括：
+
+- command classification；
+- SQLite Event Store；
+- Sessionize / Workflow Mining；
+- Cursor Hook 返回协议；
+- Cursor hooks 幂等安装；
+- Cursor thought 内容不落盘；
+- Codex nested session metadata；
+- Codex UUID / cwd 关联；
+- Coding Agent trace linking。
+
+---
+
+# 下一阶段
+
+## v0.3：NPU Native Adapter
+
+重点接入真实 NPU 研发环境：
 
 ```text
-performance regression
-    ↓
-profile
-    ↓
-bottleneck analysis
+Build Adapter
+Board / Device Adapter
+Accuracy Adapter
+Benchmark Adapter
+Profiler Adapter
+Shape Parser
 ```
 
-### v0.6：Shadow Agent
-
-Agent 不直接执行，只预测下一步：
+最终让你日常只需要正常对 Cursor / Codex 说：
 
 ```text
-Human 实际动作
-vs
-Agent 预测动作
+帮我优化这个 FA Grad shape 的性能
 ```
 
-统计：
-
-- Step Accuracy
-- Branch Accuracy
-- Parameter Accuracy
-- Final Result Accuracy
-
-达到要求后，再逐步开放自动执行权限。
-
-### v0.7：Workflow → Agent Compiler
-
-把已经 Review 的：
+Observer 就能自动积累：
 
 ```text
-workflow.yaml
-```
-
-进一步编译成：
-
-```text
-skills/
-├── SKILL.md
-├── workflow.yaml
-├── tools/
-└── evals/
-```
-
-最终目标是逐渐形成：
-
-```text
-NPU Workflow Observer
-        ↓
-Workflow Miner
-        ↓
-Workflow Compiler
-        ↓
-Test Agent
-Precision Debug Agent
-Bug Debug Agent
-Performance Agent
-```
-
-## 最终目标
-
-NPU Workflow Observer 的最终定位不是监控软件，而是：
-
-> **持续观察真实 NPU 算子研发过程，并把专家经验逐步编译成可复用 Agent 的基础设施。**
-
-理想状态下，未来只需要输入：
-
-```text
-B=2
-N=64
-S=8192
-D=128
-layout=TND
-causal=true
-```
-
-Agent 就能基于 Observer 学到的真实 Workflow 自动完成：
-
-```text
-构造用例
-→ 编译
-→ 部署
+Prompt
+→ Agent 修改
+→ Build
+→ Shape
 → 上板
-→ 精度验证
-→ 性能测试
-→ 性能回归判断
-→ 必要时 Profile
-→ 输出分析报告
+→ Accuracy
+→ Latency / MFU
+→ Profile
+→ 下一轮修改
+→ 最终结论
 ```
+
+这才是后续自动生成 NPU Test / Debug / Performance Agent 的训练数据基础。
